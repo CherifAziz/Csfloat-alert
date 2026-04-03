@@ -14,6 +14,7 @@ PAGE_SIZE           = 50    # ordres par page
 ALERT_TTL_HOURS     = 24    # on ré-alerte si toujours outbid après X heures
 MAX_RETRIES         = 4     # tentatives max par requête API
 RETRY_BASE_DELAY    = 2     # secondes (doublé à chaque retry)
+FLOAT_TOLERANCE = 0.0075
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -91,8 +92,28 @@ def expression_covers_item(expression: str, def_index: str, paint_index: str) ->
     return any(d == def_index and p == paint_index for d, p in pairs)
 
 
-def float_ranges_overlap(a_min, a_max, b_min, b_max) -> bool:
-    return not (b_max <= a_min or b_min >= a_max)
+def is_real_competitor(my_min: float, my_max: float,
+                        c_min: float,  c_max: float) -> bool:
+    """
+    Un concurrent est réel si :
+      1. Sa range chevauche la mienne (condition de base)
+      2. Son max_float est suffisamment proche du mien (à FLOAT_TOLERANCE près)
+         → il cible les mêmes items "haut de gamme" de ma range
+
+    Exemples avec FLOAT_TOLERANCE = 0.005 et ma range 0.07 → 0.10294 :
+      concurrent 0.00 → 0.0875  : 0.0875 < 0.09794  → PAS concurrent ✅
+      concurrent 0.07 → 0.12    : 0.12   >= 0.09794  → concurrent    ✅
+      concurrent 0.00 → 0.10    : 0.10   >= 0.09794  → concurrent    ✅
+      concurrent 0.00 → 0.09    : 0.09   < 0.09794   → PAS concurrent ✅
+    """
+    # 1. Vérification du chevauchement de base
+    basic_overlap = not (c_max <= my_min or c_min >= my_max)
+    if not basic_overlap:
+        return False
+
+    # 2. Le max du concurrent doit couvrir presque toute ma range vers le haut
+    covers_upper_bound = c_max >= (my_max - FLOAT_TOLERANCE)
+    return covers_upper_bound
 
 
 # ── Fetch mes ordres ──────────────────────────────────────────────────────────
@@ -150,19 +171,19 @@ def fetch_competitor_orders(listing_id: str) -> list[dict]:
 
 
 # ── Détection du vrai outbid ──────────────────────────────────────────────────
-def find_outbidder(competitor_orders, my_price, my_min, my_max,
-                   def_index, paint_index) -> dict | None:
+def find_outbidder(competitor_orders, my_price, my_min, my_max, def_index, paint_index) -> dict | None:
     for order in competitor_orders:
         price = order.get("price", 0)
         if price <= my_price:
-            break  # Liste triée décroissante — inutile de continuer
+            break
 
         expr = order.get("expression", "")
         if not expression_covers_item(expr, def_index, paint_index):
             continue
 
         c_min, c_max = parse_float_range(expr)
-        if float_ranges_overlap(my_min, my_max, c_min, c_max):
+
+        if is_real_competitor(my_min, my_max, c_min, c_max):  # ← ici
             return order
 
     return None
