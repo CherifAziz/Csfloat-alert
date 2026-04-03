@@ -31,12 +31,6 @@ log = logging.getLogger()
 
 # ── API avec retry + rate-limit ───────────────────────────────────────────────
 def api_get(url: str, params: dict = None) -> dict | list:
-    """
-    GET avec retry automatique.
-    - 429 (rate limit) : attend le temps indiqué dans le header Retry-After
-    - 5xx             : backoff exponentiel
-    - 401             : erreur fatale, on arrête tout
-    """
     delay = RETRY_BASE_DELAY
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -44,6 +38,10 @@ def api_get(url: str, params: dict = None) -> dict | list:
 
             if r.status_code == 401:
                 raise RuntimeError("❌ Clé API rejetée (401) — vérifie CSFLOAT_API_KEY.")
+
+            if r.status_code == 403:
+                log.warning(f"  [403] Accès refusé pour {url} params={params} — skip.")
+                return {}   # ← on retourne vide, pas de crash
 
             if r.status_code == 429:
                 wait = int(r.headers.get("Retry-After", 30))
@@ -134,12 +132,38 @@ def fetch_my_orders() -> list[dict]:
     return all_orders
 
 
+# Table de fallback : on mappe (def_index, paint_index) → market_hash_name
+# Construite automatiquement depuis tes propres ordres au démarrage
+item_name_cache: dict[tuple, str] = {}
+
+def build_name_cache(my_orders: list[dict]):
+    """
+    Extrait une map (def_index, paint_index) → nom lisible
+    depuis l'expression de tes propres ordres.
+    CSFloat met 'Item == "Nom du skin"' dans certaines expressions,
+    sinon on garde un fallback générique.
+    """
+    for order in my_orders:
+        expr = order.get("expression", "")
+        def_m   = re.search(r'DefIndex\s*==\s*(\d+)',   expr)
+        paint_m = re.search(r'PaintIndex\s*==\s*(\d+)', expr)
+        if not def_m or not paint_m:
+            continue
+        key = (def_m.group(1), paint_m.group(1))
+        if key not in item_name_cache:
+            name_m = re.search(r'Item\s*==\s*"([^"]+)"', expr)
+            item_name_cache[key] = name_m.group(1) if name_m else f"DefIdx={key[0]} PaintIdx={key[1]}"
+
 # ── Fetch listing (pour nom + ID) ─────────────────────────────────────────────
 def get_listing_info(def_index: str, paint_index: str) -> dict | None:
     """
-    Retourne { 'id': '...', 'name': 'MAC-10 | Whitefish (...)' }
-    depuis n'importe quel listing actif de cet item.
+    Essaie d'abord avec def_index+paint_index.
+    Si 403/vide, essaie avec market_hash_name (depuis item_name_cache).
+    Si toujours rien, retourne None.
     """
+    cache_key = (def_index, paint_index)
+
+    # Tentative 1 : filtrage par def_index + paint_index
     data = api_get(
         "https://csfloat.com/api/v1/listings",
         params={
@@ -150,12 +174,29 @@ def get_listing_info(def_index: str, paint_index: str) -> dict | None:
         }
     )
     listings = data if isinstance(data, list) else data.get("data", [])
+
+    # Tentative 2 : fallback sur market_hash_name si on en a un
+    if not listings and cache_key in item_name_cache:
+        fallback_name = item_name_cache[cache_key]
+        log.info(f"  [fallback] Recherche par nom : {fallback_name}")
+        data = api_get(
+            "https://csfloat.com/api/v1/listings",
+            params={
+                "market_hash_name": fallback_name,
+                "type":             "buy_now",
+                "limit":            1,
+            }
+        )
+        listings = data if isinstance(data, list) else data.get("data", [])
+
     if not listings:
         return None
-    listing = listings[0]
+
+    listing  = listings[0]
+    raw_name = listing.get("item", {}).get("market_hash_name", item_name_cache.get(cache_key, f"DefIdx={def_index}"))
     return {
         "id":   listing["id"],
-        "name": listing.get("item", {}).get("market_hash_name", f"DefIdx={def_index}"),
+        "name": clean_skin_name(raw_name),
     }
 
 
@@ -264,6 +305,8 @@ while True:
         # 1. Mes ordres actifs
         my_orders = fetch_my_orders()
         log.info(f"  {len(my_orders)} ordres actifs trouvés.\n")
+
+        build_name_cache(my_orders)
 
         for my_order in my_orders:
             oid      = my_order["id"]
