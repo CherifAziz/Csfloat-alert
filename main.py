@@ -154,6 +154,18 @@ def build_name_cache(my_orders: list[dict]):
             name_m = re.search(r'Item\s*==\s*"([^"]+)"', expr)
             item_name_cache[key] = name_m.group(1) if name_m else f"DefIdx={key[0]} PaintIdx={key[1]}"
 
+def clean_skin_name(raw_name: str) -> str:
+    """
+    'StatTrak™ MAC-10 | Whitefish (Factory New)'  →  'MAC-10 | Whitefish'
+    'Souvenir P90 | Traction (Battle-Scarred)'    →  'P90 | Traction'
+    'MAC-10 | Whitefish (Minimal Wear)'           →  'MAC-10 | Whitefish'
+    """
+    # Supprime le suffixe d'état entre parenthèses
+    name = re.sub(r'\s*\([^)]+\)\s*$', '', raw_name).strip()
+    # Supprime les préfixes StatTrak™ et Souvenir
+    name = re.sub(r'^(StatTrak™|Souvenir)\s+', '', name).strip()
+    return name
+
 # ── Fetch listing (pour nom + ID) ─────────────────────────────────────────────
 def get_listing_info(def_index: str, paint_index: str) -> dict | None:
     """
