@@ -82,12 +82,27 @@ def parse_float_range(expression: str) -> tuple[float, float]:
 
 
 def expression_covers_item(expression: str, def_index: str, paint_index: str) -> bool:
-    """Gère les expressions simples ET les groupes OR multi-items."""
+    """Gère DefIndex/PaintIndex ET le format Item == 'Nom'."""
+    # Format historique : DefIndex == X and PaintIndex == Y
     pairs = re.findall(r'DefIndex\s*==\s*(\d+)\s*and\s*PaintIndex\s*==\s*(\d+)', expression)
     pairs += [(b, a) for a, b in re.findall(
         r'PaintIndex\s*==\s*(\d+)\s*and\s*DefIndex\s*==\s*(\d+)', expression
     )]
-    return any(d == def_index and p == paint_index for d, p in pairs)
+    if any(d == def_index and p == paint_index for d, p in pairs):
+        return True
+
+    # ✅ Nouveau : format Item == "Nom du skin"
+    # On vérifie si le nom dans l'expression correspond au nom en cache pour ce (def_index, paint_index)
+    item_match = re.search(r'Item\s*==\s*"([^"]+)"', expression)
+    if item_match:
+        cache_key = (def_index, paint_index)
+        cached_name = item_name_cache.get(cache_key, "")
+        competitor_name = clean_skin_name(item_match.group(1))
+        my_name = clean_skin_name(cached_name)
+        if my_name and competitor_name == my_name:
+            return True
+
+    return False
 
 
 def is_real_competitor(my_min: float, my_max: float,
@@ -167,6 +182,40 @@ def clean_skin_name(raw_name: str) -> str:
     return name
 
 # ── Fetch listing (pour nom + ID) ─────────────────────────────────────────────
+WEAR_BOUNDARIES = [0.00, 0.07, 0.15, 0.38, 0.45, 1.00]
+
+def get_wear_range(float_min: float, float_max: float) -> tuple[float, float]:
+    """Retourne les bornes de wear standard qui englobent la range donnée."""
+    lower = max(b for b in WEAR_BOUNDARIES if b <= float_min)
+    upper = min(b for b in WEAR_BOUNDARIES if b >= float_max)
+    return lower, upper
+
+
+def build_similar_orders_payload(expr: str) -> dict | None:
+    rules = []
+
+    m = re.search(r'DefIndex\s*==\s*(\d+)', expr)
+    if not m: return None
+    rules.append({"field": "DefIndex", "operator": "==", "value": {"constant": m.group(1)}})
+
+    m = re.search(r'PaintIndex\s*==\s*(\d+)', expr)
+    if not m: return None
+    rules.append({"field": "PaintIndex", "operator": "==", "value": {"constant": m.group(1)}})
+
+    # ✅ On utilise les bornes de wear standard, pas les floats exacts
+    my_min, my_max = parse_float_range(expr)
+    wear_min, wear_max = get_wear_range(my_min, my_max)
+
+    if wear_min > 0.0:
+        rules.append({"field": "FloatValue", "operator": ">=", "value": {"constant": str(wear_min)}})
+    rules.append({"field": "FloatValue", "operator": "<", "value": {"constant": str(wear_max)}})
+
+    m = re.search(r'StatTrak\s*==\s*(true|false)', expr)
+    if m:
+        rules.append({"field": "StatTrak", "operator": "==", "value": {"constant": m.group(1)}})
+
+    return {"expression": {"condition": "and", "rules": rules}}
+
 def get_listing_info(def_index: str, paint_index: str) -> dict | None:
     """
     Essaie d'abord avec def_index+paint_index.
@@ -205,23 +254,69 @@ def get_listing_info(def_index: str, paint_index: str) -> dict | None:
         return None
 
     listing  = listings[0]
-    raw_name = listing.get("item", {}).get("market_hash_name", item_name_cache.get(cache_key, f"DefIdx={def_index}"))
+    raw_name = listing.get("item", {}).get("market_hash_name", "")
     return {
-        "id":   listing["id"],
-        "name": clean_skin_name(raw_name),
+        "id":       listing["id"],
+        "name":     clean_skin_name(raw_name),
+        "raw_name": raw_name,   # ← AJOUT : "P90 | Virus (Minimal Wear)"
     }
 
 
 # ── Fetch ordres concurrents ──────────────────────────────────────────────────
-def fetch_competitor_orders(listing_id: str) -> list[dict]:
-    data = api_get(
-        f"https://csfloat.com/api/v1/listings/{listing_id}/buy-orders",
-        params={"limit": 50}
-    )
-    if not data:
+def fetch_competitor_orders(my_expr: str) -> list[dict]:
+    payload = build_similar_orders_payload(my_expr)
+    if not payload:
+        log.warning("  [SKIP] Impossible de construire le payload similar-orders.")
         return []
-    return data if isinstance(data, list) else data.get("orders", [])
 
+    delay = RETRY_BASE_DELAY
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.post(
+                "https://csfloat.com/api/v1/buy-orders/similar-orders",
+                json=payload,
+                headers={**HEADERS, "Content-Type": "application/json"},
+                params={"limit": 50},
+                timeout=30,  # ← 15 → 30s
+            )
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", 30))
+                log.warning(f"  [429] Rate limit — attente {wait}s...")
+                time.sleep(wait)
+                continue
+            if r.status_code == 400:
+                # Payload rejeté par l'API — on loggue et on abandonne (pas de retry)
+                log.warning(f"  [400] Payload rejeté pour expression : {my_expr[:80]}")
+                log.warning(f"  [400] Payload envoyé : {payload}")
+                return []
+            if r.status_code in (502, 503, 504):
+                time.sleep(delay); delay *= 2; continue
+            r.raise_for_status()
+            return r.json().get("data", [])
+
+        except requests.exceptions.Timeout:
+            log.warning(f"  [TIMEOUT] similar-orders retry {attempt}/{MAX_RETRIES}")
+            time.sleep(delay); delay *= 2
+        except requests.exceptions.ConnectionError as e:
+            log.warning(f"  [RÉSEAU] similar-orders retry {attempt}/{MAX_RETRIES}: {e}")
+            time.sleep(delay); delay *= 2
+
+    log.error(f"  [ÉCHEC] similar-orders abandonné après {MAX_RETRIES} tentatives.")
+    return []
+
+WEAR_FLOAT_RANGES = {
+    "Factory New":    (0.00, 0.07),
+    "Minimal Wear":   (0.07, 0.15),
+    "Field-Tested":   (0.15, 0.38),
+    "Well-Worn":      (0.38, 0.45),
+    "Battle-Scarred": (0.45, 1.00),
+}
+
+def parse_wear_range(market_hash_name: str) -> tuple[float, float] | None:
+    for wear, range_ in WEAR_FLOAT_RANGES.items():
+        if wear in market_hash_name:
+            return range_
+    return None
 
 # ── Détection du vrai outbid ──────────────────────────────────────────────────
 def find_outbidder(competitor_orders, my_price, my_min, my_max, def_index, paint_index) -> dict | None:
@@ -231,13 +326,26 @@ def find_outbidder(competitor_orders, my_price, my_min, my_max, def_index, paint
             break
 
         expr = order.get("expression", "")
-        if not expression_covers_item(expr, def_index, paint_index):
-            continue
 
-        c_min, c_max = parse_float_range(expr)
+        if expr:
+            # Ordre avec expression explicite
+            if not expression_covers_item(expr, def_index, paint_index):
+                continue
+            c_min, c_max = parse_float_range(expr)
+        else:
+            # Ordre sans expression : range déduite du wear
+            mhn = order.get("market_hash_name", "")
+            cache_key = (def_index, paint_index)
+            my_raw = listing_cache.get(cache_key, {}).get("raw_name", "")
+            if not mhn or clean_skin_name(mhn) != clean_skin_name(my_raw):
+                continue
+            wear_range = parse_wear_range(mhn)
+            if not wear_range:
+                continue
+            c_min, c_max = wear_range
 
-        if is_real_competitor(my_min, my_max, c_min, c_max):  # ← ici
-            return order
+        if is_real_competitor(my_min, my_max, c_min, c_max):
+            return {**order, "_c_min": c_min, "_c_max": c_max}
 
     return None
 
@@ -246,11 +354,16 @@ def find_outbidder(competitor_orders, my_price, my_min, my_max, def_index, paint
 def send_alert(skin_name: str, listing_id: str,
                my_order: dict, competitor: dict,
                c_min: float, c_max: float):
+
+
+    c_min = competitor.get("_c_min", c_min)
+    c_max = competitor.get("_c_max", c_max)
+
     my_price = my_order["price"]
     c_price  = competitor["price"]
     my_min, my_max = parse_float_range(my_order.get("expression", ""))
 
-    # URL directe vers le listing sur CSFloat
+    # URL directe vers le listing sur CSFloat 
     item_url = f"https://csfloat.com/item/{listing_id}"
 
     msg = {
@@ -348,11 +461,10 @@ while True:
             listing_info = listing_cache[cache_key]
             skin_name    = listing_info["name"]
             listing_id   = listing_info["id"]
-
             log.info(f"  {skin_name} | ${my_price/100:.2f} | float {my_min:.4f}→{my_max:.4f}")
 
             # 3. Ordres concurrents
-            competitors = fetch_competitor_orders(listing_id)
+            competitors = fetch_competitor_orders(expr)
             if not competitors:
                 log.info(f"    → Aucun ordre concurrent.")
                 time.sleep(0.4)
