@@ -5,15 +5,15 @@ import logging
 from datetime import datetime, timedelta
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CSFLOAT_API_KEY = "GEte73Ed62GCbeEsjG9gxgm4rDR5mWkD"  # From csfloat.com/profile → Developer tab
+CSFLOAT_API_KEY = "ulvgel9cH1wMnuIsBzwmkxh6AFnjs-sn"  # From csfloat.com/profile → Developer tab
 WEBHOOK_URL = "https://discord.com/api/webhooks/1489388345329979402/IEpws8AYOif6H-0oOxOgbggMMgOxzbxmodB3InJfkpex3jPrYBXegNdXVZ5cIp9QhpWe"
 HEADERS         = {"Authorization": CSFLOAT_API_KEY}
 
 CHECK_INTERVAL      = 60    # secondes entre chaque cycle complet
 PAGE_SIZE           = 50    # ordres par page
 ALERT_TTL_HOURS     = 24    # on ré-alerte si toujours outbid après X heures
-MAX_RETRIES         = 4     # tentatives max par requête API
-RETRY_BASE_DELAY    = 2     # secondes (doublé à chaque retry)
+MAX_RETRIES         = 8     # tentatives max par requête API
+RETRY_BASE_DELAY    = 5     # secondes (doublé à chaque retry)
 FLOAT_TOLERANCE = 0.0075
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ def api_get(url: str, params: dict = None) -> dict | list:
                 return {}   # ← on retourne vide, pas de crash
 
             if r.status_code == 429:
-                wait = int(r.headers.get("Retry-After", 30))
+                wait = int(r.headers.get("Retry-After", 60))
                 log.warning(f"  [429] Rate limit — attente {wait}s...")
                 time.sleep(wait)
                 continue
@@ -143,7 +143,7 @@ def fetch_my_orders() -> list[dict]:
         if len(all_orders) >= total or not batch:
             break
         page += 1
-        time.sleep(0.3)
+        time.sleep(2)
     return all_orders
 
 
@@ -280,7 +280,8 @@ def fetch_competitor_orders(my_expr: str) -> list[dict]:
                 timeout=30,  # ← 15 → 30s
             )
             if r.status_code == 429:
-                wait = int(r.headers.get("Retry-After", 30))
+                print("from competitor_orders")
+                wait = int(r.headers.get("Retry-After", 60))
                 log.warning(f"  [429] Rate limit — attente {wait}s...")
                 time.sleep(wait)
                 continue
@@ -454,7 +455,7 @@ while True:
                 info = get_listing_info(def_index, paint_index)
                 if not info:
                     log.info(f"  [--] Aucun listing actif pour DefIdx={def_index} PaintIdx={paint_index}")
-                    time.sleep(0.4)
+                    time.sleep(2)
                     continue
                 listing_cache[cache_key] = info
 
@@ -467,7 +468,7 @@ while True:
             competitors = fetch_competitor_orders(expr)
             if not competitors:
                 log.info(f"    → Aucun ordre concurrent.")
-                time.sleep(0.4)
+                time.sleep(2)
                 continue
 
             # 4. Détection outbid
@@ -490,7 +491,7 @@ while True:
             else:
                 log.info(f"    ✅ Pas d'outbid réel.")
 
-            time.sleep(0.4)
+            time.sleep(30)
 
         log.info(f"\n[✅] Cycle #{cycle} terminé. Prochain dans {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
