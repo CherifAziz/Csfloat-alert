@@ -9,7 +9,7 @@ CSFLOAT_API_KEY = "ulvgel9cH1wMnuIsBzwmkxh6AFnjs-sn"  # From csfloat.com/profile
 WEBHOOK_URL = "https://discord.com/api/webhooks/1489388345329979402/IEpws8AYOif6H-0oOxOgbggMMgOxzbxmodB3InJfkpex3jPrYBXegNdXVZ5cIp9QhpWe"
 HEADERS         = {"Authorization": CSFLOAT_API_KEY}
 
-CHECK_INTERVAL      = 60    # secondes entre chaque cycle complet
+CHECK_INTERVAL      = 1000    # secondes entre chaque cycle complet
 PAGE_SIZE           = 50    # ordres par page
 ALERT_TTL_HOURS     = 24    # on ré-alerte si toujours outbid après X heures
 MAX_RETRIES         = 8     # tentatives max par requête API
@@ -468,7 +468,7 @@ while True:
             competitors = fetch_competitor_orders(expr)
             if not competitors:
                 log.info(f"    → Aucun ordre concurrent.")
-                time.sleep(2)
+                time.sleep(30)
                 continue
 
             # 4. Détection outbid
@@ -491,7 +491,7 @@ while True:
             else:
                 log.info(f"    ✅ Pas d'outbid réel.")
 
-            time.sleep(30)
+            time.sleep(60)
 
         log.info(f"\n[✅] Cycle #{cycle} terminé. Prochain dans {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
