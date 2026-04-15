@@ -12,7 +12,7 @@ HEADERS         = {"Authorization": CSFLOAT_API_KEY}
 CHECK_INTERVAL      = 1000    # secondes entre chaque cycle complet
 PAGE_SIZE           = 50    # ordres par page
 ALERT_TTL_HOURS     = 24    # on ré-alerte si toujours outbid après X heures
-MAX_RETRIES         = 8     # tentatives max par requête API
+MAX_RETRIES         = 1     # tentatives max par requête API
 RETRY_BASE_DELAY    = 5     # secondes (doublé à chaque retry)
 FLOAT_TOLERANCE = 0.0075
 
