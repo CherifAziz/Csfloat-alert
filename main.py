@@ -202,13 +202,11 @@ def build_similar_orders_payload(expr: str) -> dict | None:
     if not m: return None
     rules.append({"field": "PaintIndex", "operator": "==", "value": {"constant": m.group(1)}})
 
-    # ✅ On utilise les bornes de wear standard, pas les floats exacts
+    # Utilise la plage float exacte de l'ordre d'achat.
     my_min, my_max = parse_float_range(expr)
-    wear_min, wear_max = get_wear_range(my_min, my_max)
-
-    if wear_min > 0.0:
-        rules.append({"field": "FloatValue", "operator": ">=", "value": {"constant": str(wear_min)}})
-    rules.append({"field": "FloatValue", "operator": "<", "value": {"constant": str(wear_max)}})
+    if my_min > 0.0:
+        rules.append({"field": "FloatValue", "operator": ">=", "value": {"constant": str(my_min)}})
+    rules.append({"field": "FloatValue", "operator": "<", "value": {"constant": str(my_max)}})
 
     m = re.search(r'StatTrak\s*==\s*(true|false)', expr)
     if m:
@@ -491,7 +489,7 @@ while True:
             else:
                 log.info(f"    ✅ Pas d'outbid réel.")
 
-            time.sleep(60)
+            time.sleep(32)
 
         log.info(f"\n[✅] Cycle #{cycle} terminé. Prochain dans {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
