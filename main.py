@@ -348,6 +348,49 @@ def find_outbidder(competitor_orders, my_price, my_min, my_max, def_index, paint
 
     return None
 
+# ── Auto-restock ordre à qty=1 ────────────────────────────────────────────────
+def patch_order_quantity(order_id: str, new_qty: int, current_price: int) -> bool:
+    """Augmente la quantité d'un ordre via PATCH. Retourne True si succès."""
+    url = f"https://csfloat.com/api/v1/buy-orders/{order_id}"
+    payload = {"max_price": current_price, "quantity": new_qty}
+    
+    try:
+        r = requests.patch(
+            url,
+            json=payload,
+            headers={**HEADERS, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        if r.status_code == 429:
+            wait = int(r.headers.get("Retry-After", 60))
+            log.warning(f"  [429] Rate limit PATCH — attente {wait}s...")
+            time.sleep(wait)
+            r = requests.patch(url, json=payload, headers={**HEADERS, "Content-Type": "application/json"}, timeout=15)
+        
+        if r.status_code == 200:
+            return True
+        
+        log.warning(f"  [PATCH] Échec {r.status_code} pour order {order_id}: {r.text[:100]}")
+        return False
+
+    except Exception as e:
+        log.warning(f"  [PATCH] Erreur réseau: {e}")
+        return False
+
+
+def send_restock_alert(skin_name: str, order_id: str, old_qty: int, new_qty: int):
+    msg = {
+        "content": (
+            f"🔄 **RESTOCK AUTO** — **{skin_name}**\n"
+            f"📦 Quantité descendue à **{old_qty}** → remontée automatiquement à **{new_qty}**\n"
+            f"🆔 Ordre : `{order_id}`"
+        )
+    }
+    try:
+        requests.post(WEBHOOK_URL, json=msg, timeout=5)
+        log.info(f"    📨 Alerte restock Discord envoyée.")
+    except Exception as e:
+        log.warning(f"    [WARN] Discord restock failed: {e}")
 
 # ── Discord ───────────────────────────────────────────────────────────────────
 def send_alert(skin_name: str, listing_id: str,
@@ -461,6 +504,17 @@ while True:
             skin_name    = listing_info["name"]
             listing_id   = listing_info["id"]
             log.info(f"  {skin_name} | ${my_price/100:.2f} | float {my_min:.4f}→{my_max:.4f}")
+
+            # ✅ Auto-restock si qty == 1
+            current_qty = my_order.get("qty", 0)
+            if current_qty == 1:
+                log.info(f"    ⚠️  Quantité = 1 — restock automatique en cours...")
+                success = patch_order_quantity(oid, 2, my_price)
+                if success:
+                    send_restock_alert(skin_name, oid, 1, 2)
+                    log.info(f"    ✅ Quantité remontée à 2.")
+                else:
+                    log.warning(f"    ❌ Échec du restock pour {skin_name}.")
 
             # 3. Ordres concurrents
             competitors = fetch_competitor_orders(expr)
